@@ -6,3 +6,4 @@ wordcloud
 matplotlib
 Pillow
 supabase
+cloudscraper
