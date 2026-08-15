@@ -104,7 +104,7 @@ def fetch_and_update_posts(user_id):
     first_url = f"https://ch.dlsite.com/api/pommu/users/{user_id}/posts?ageCategory=2&limit=30&page=1"
     response = requests.get(first_url, headers=HEADERS)
     if response.status_code != 200:
-        st.error("APIからのデータ取得に失敗しました。")
+        st.error(f"APIからのデータ取得に失敗しました。（エラーコード: {response.status_code}）")
         return False
         
     data = response.json()
