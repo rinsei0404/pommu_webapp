@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import cloudscraper
 import json
 import time
 import os
@@ -20,11 +21,20 @@ from supabase import create_client, Client
 # ---------------------------------------------
 # 共通設定・Supabase接続
 # ---------------------------------------------
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+# 💡 普通のブラウザからのアクセスに見せかける強力なヘッダー
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Referer": "https://ch.dlsite.com/",
+    "Origin": "https://ch.dlsite.com"
+}
 DEFAULT_ICON_URL = "https://placehold.jp/150x150.png?text=No%20Image"
-FONT_PATH = "C:\Windows\Fonts\msgothic.ttc" 
+FONT_PATH = "ipaexg.ttf" 
 
-# st.secrets(金庫)から情報を読み込んでSupabaseと接続
+# 💡 Cloudflare回避用のスクレイパーを作成
+scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
@@ -32,10 +42,9 @@ try:
 except Exception:
     supabase = None
 
-# --- クラウド同期用のヘルパー関数 ---
 def download_from_supabase(filename):
     if not supabase: return False
-    if os.path.exists(filename): return True # ローカルにあれば何もしない（爆速）
+    if os.path.exists(filename): return True
     try:
         res = supabase.storage.from_("pommu-data").download(filename)
         with open(filename, "wb") as f: f.write(res)
@@ -44,7 +53,7 @@ def download_from_supabase(filename):
 
 def upload_to_supabase(filename):
     if not supabase: return
-    try: supabase.storage.from_("pommu-data").remove([filename]) # 上書きのために一度削除
+    try: supabase.storage.from_("pommu-data").remove([filename])
     except: pass
     try:
         with open(filename, "rb") as f:
@@ -60,12 +69,12 @@ def wrap_japanese_text(text, width=22):
     return '\n'.join(result)
 
 # ---------------------------------------------
-# データ取得・更新用関数
+# データ取得・更新用関数（scraperに置換）
 # ---------------------------------------------
 @st.cache_data
 def fetch_user_profile(user_id):
     try:
-        res = requests.get(f"https://ch.dlsite.com/api/pommu/users/{user_id}", headers=HEADERS)
+        res = scraper.get(f"https://ch.dlsite.com/api/pommu/users/{user_id}", headers=HEADERS)
         if res.status_code == 200:
             data = res.json()
             name, icon = None, None
@@ -83,8 +92,8 @@ def fetch_user_profile(user_id):
 def fetch_post_info(post_id):
     try:
         time.sleep(0.3)
-        response = requests.get(f"https://ch.dlsite.com/api/pommu/posts/{post_id}", headers=HEADERS)
-        if response.status_code == 200: return response.json()
+        res = scraper.get(f"https://ch.dlsite.com/api/pommu/posts/{post_id}", headers=HEADERS)
+        if res.status_code == 200: return res.json()
     except: pass
     return None
 
@@ -102,7 +111,7 @@ def fetch_and_update_posts(user_id):
     latest_existing_id = existing_posts[0].get("id") if existing_posts and isinstance(existing_posts[0], dict) else None
     
     first_url = f"https://ch.dlsite.com/api/pommu/users/{user_id}/posts?ageCategory=2&limit=30&page=1"
-    response = requests.get(first_url, headers=HEADERS)
+    response = scraper.get(first_url, headers=HEADERS)
     if response.status_code != 200:
         st.error(f"APIからのデータ取得に失敗しました。（エラーコード: {response.status_code}）")
         return False
@@ -118,13 +127,13 @@ def fetch_and_update_posts(user_id):
         progress_text = st.empty()
         for page in range(1, last_page + 1):
             progress_text.text(f"📥 投稿を取得中... ({page}/{last_page}ページ)")
-            res = requests.get(f"https://ch.dlsite.com/api/pommu/users/{user_id}/posts?ageCategory=2&limit=30&page={page}", headers=HEADERS)
+            res = scraper.get(f"https://ch.dlsite.com/api/pommu/users/{user_id}/posts?ageCategory=2&limit=30&page={page}", headers=HEADERS)
             if res.status_code == 200: all_posts.extend(res.json().get("posts", []))
             bar.progress(page / last_page)
             time.sleep(1)
             
         with open(filename, "w", encoding="utf-8") as f: json.dump(all_posts, f, ensure_ascii=False, indent=2)
-        upload_to_supabase(filename) # クラウドにバックアップ
+        upload_to_supabase(filename)
         st.success(f"✅ 全 {len(all_posts)} 件の保存が完了しました！")
         return True
 
@@ -136,7 +145,7 @@ def fetch_and_update_posts(user_id):
     if new_posts:
         st.success(f"✨ 新しい投稿が **{len(new_posts)}件** 見つかりました！差分を追加・集計します。")
         with open(filename, "w", encoding="utf-8") as f: json.dump(new_posts + existing_posts, f, ensure_ascii=False, indent=2)
-        upload_to_supabase(filename) # クラウドにバックアップ
+        upload_to_supabase(filename)
         
         if os.path.exists(analysis_file):
             st.info("🔄 分析データを差分アップデートしています...")
@@ -165,7 +174,7 @@ def fetch_and_update_posts(user_id):
                 
             with open(analysis_file, "w", encoding="utf-8") as f:
                 json.dump({"user_scores": dict(u_scores), "recent_scores": dict(r_scores), "user_info": u_info}, f, ensure_ascii=False)
-            upload_to_supabase(analysis_file) # クラウドにバックアップ
+            upload_to_supabase(analysis_file)
             st.success("✅ 分析データの差分アップデートが完了しました！")
     else:
         st.info("💡 新しい投稿はありませんでした。最新の状態です！")
@@ -173,7 +182,7 @@ def fetch_and_update_posts(user_id):
 
 def get_pil_image_from_url(url, size=(100, 100)):
     try:
-        res = requests.get(url, timeout=3)
+        res = scraper.get(url, headers=HEADERS, timeout=3)
         if res.status_code == 200: return Image.open(io.BytesIO(res.content)).convert("RGBA").resize(size)
     except: pass
     return Image.new("RGBA", size, (200, 200, 200, 255))
@@ -191,7 +200,6 @@ if "is_analyzing" not in st.session_state: st.session_state.is_analyzing = False
 if input_user_id:
     st.header("1. データの準備")
     
-    # 💡 ユーザーIDが入力されたら、まずクラウドにデータがないか探しに行く
     if not os.path.exists(posts_file):
         with st.spinner("☁️ クラウドからデータを検索中..."):
             download_from_supabase(posts_file)
@@ -213,7 +221,6 @@ if input_user_id:
         else:
             with open(posts_file, "r", encoding="utf-8") as f: posts = json.load(f)
             
-            # --- 集計処理 ---
             if os.path.exists(analysis_file):
                 with open(analysis_file, "r", encoding="utf-8") as f:
                     saved = json.load(f)
@@ -240,9 +247,8 @@ if input_user_id:
                     
                 with open(analysis_file, "w", encoding="utf-8") as f:
                     json.dump({"user_scores": dict(user_scores), "recent_scores": dict(recent_scores), "user_info": user_info}, f, ensure_ascii=False)
-                upload_to_supabase(analysis_file) # クラウドにバックアップ
+                upload_to_supabase(analysis_file)
 
-            # --- メニュー1: グラフ ---
             st.subheader("🕒 活動時間の分析")
             view_mode = st.radio("表示形式", ["🔥 曜日×時間帯ヒートマップ", "📊 24時間トータル棒グラフ", "📈 月ごとの投稿推移"], index=1, horizontal=True)
             if view_mode == "🔥 曜日×時間帯ヒートマップ":
@@ -261,12 +267,10 @@ if input_user_id:
                     if p.get("createdAt"): m_counts[datetime.strptime(p["createdAt"], "%Y-%m-%d %H:%M:%S").strftime("%Y-%m")] += 1
                 st.bar_chart(pd.DataFrame(sorted(m_counts.items()), columns=["年月", "投稿数"]).set_index("年月")["投稿数"])
 
-            # --- メニュー2: ランキング ---
             st.subheader("👑 総合仲良しランキング")
             ranking = sorted(user_scores.items(), key=lambda x: x[1], reverse=True)[:10]
             st.dataframe(pd.DataFrame([{"順位": r, "アイコン": user_info[u]["icon"], "ユーザー名": user_info[u]["name"], "スコア": s} for r, (u, s) in enumerate(ranking, 1)]), column_config={"アイコン": st.column_config.ImageColumn(width="small")}, hide_index=True, use_container_width=True)
 
-            # --- メニュー3: 初絡み ---
             st.subheader("🕰️ 初絡み")
             for p in sorted([p for p in posts if "deletedAt" not in p], key=lambda x: x.get("createdAt", "")):
                 t_id = p.get("replyToId") or p.get("quotedPostId")
@@ -277,13 +281,11 @@ if input_user_id:
                         st.info(f"{p.get('createdAt')}\n\n{p.get('texts', '')}\n[🔗 投稿を見る](https://ch.dlsite.com/pommu/posts/{p['id']})")
                         break
 
-            # --- メニュー4: 人気の投稿 ---
             st.subheader("🔥 人気の投稿TOP3")
             for i, p in enumerate(sorted([p for p in posts if "deletedAt" not in p], key=lambda x: x.get("favoritedByCount", 0) + x.get("quotedByCount", 0), reverse=True)[:3]):
                 st.markdown(f"**第{i+1}位** 👑 (いいね: {p.get('favoritedByCount',0)} / 引用: {p.get('quotedByCount',0)}) [🔗 投稿を見る](https://ch.dlsite.com/pommu/posts/{p['id']})")
                 st.info(p.get("texts", ""))
 
-            # --- メニュー5: 埋もれた投稿発掘 ---
             st.subheader("🕳️ 埋もれた投稿発掘")
             zero_posts = [p for p in posts if "deletedAt" not in p and p.get("favoritedByCount",0)==0 and p.get("quotedByCount",0)==0 and p.get("repliedByCount",0)==0 and not p.get("replyToId") and not p.get("quotedPostId")]
             if zero_posts:
@@ -292,7 +294,6 @@ if input_user_id:
                 st.info(f"{dp.get('texts', '')}\n\n[🔗 過去を見に行く](https://ch.dlsite.com/pommu/posts/{dp['id']})")
             else: st.success("対象の投稿はありませんでした！")
 
-            # --- メニュー6: ハッシュタグ ---
             st.subheader("🏷️ よく使うハッシュタグ")
             h_counts = defaultdict(int)
             for p in posts:
@@ -300,7 +301,6 @@ if input_user_id:
                     for tag in re.findall(r'[#＃]([\wぁ-んァ-ヶ一-龠ー]+)', p["texts"]): h_counts[tag] += 1
             if h_counts: st.dataframe(pd.DataFrame(sorted(h_counts.items(), key=lambda x: x[1], reverse=True)[:10], columns=["ハッシュタグ", "使用回数"]), hide_index=True)
 
-            # --- メニュー7: ワードクラウド ---
             st.subheader("☁️ あなたの脳内（ワードクラウド）")
             if st.button("ワードクラウドを生成する"):
                 with st.spinner("言葉を分析中..."):
@@ -317,7 +317,6 @@ if input_user_id:
                         wc = WordCloud(font_path=FONT_PATH, width=800, height=400, background_color="white", colormap="viridis").generate(text_for_cloud)
                         fig, ax = plt.subplots(figsize=(10, 5)); ax.imshow(wc); ax.axis("off"); st.pyplot(fig)
 
-            # --- メニュー8: レポート画像生成 ---
             st.write("---")
             st.subheader("🖼️ 分析レポートを画像で書き出す")
             
@@ -405,7 +404,6 @@ if input_user_id:
                     except Exception as e:
                         st.error(f"画像生成エラー（フォントパス等を確認してください）: {e}")
 
-            # --- メニュー9: シェアボタン ---
             st.write("---")
             st.subheader("🌐 結果をシェアする")
             
